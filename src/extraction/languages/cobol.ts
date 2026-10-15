@@ -11,10 +11,11 @@
  *   sibling statements — so extents are reconstructed here: a paragraph runs
  *   from its header to the next header, a section to the next section header.
  * - PERFORM (including THRU ranges), GO TO, and CALL 'literal' become `calls`
- *   references. A dynamic CALL through a data name is skipped — announce,
- *   don't guess. EXEC CICS LINK/XCTL PROGRAM('X') with a literal target also
- *   becomes a `calls` reference; EXEC SQL INCLUDE X becomes an `imports`
- *   reference (DB2's COPY).
+ *   references. A dynamic CALL through a data name is skipped unless the same
+ *   file has a statically-known literal moved into that variable, in which case
+ *   every distinct literal target is emitted as a `calls` reference. EXEC CICS
+ *   LINK/XCTL PROGRAM('X') with a literal target also becomes a `calls`
+ *   reference; EXEC SQL INCLUDE X becomes an `imports` reference (DB2's COPY).
  * - COPY statements become `import` nodes + `imports` references.
  * - DATA DIVISION entries become `variable` (01/77 levels), `field` (nested
  *   levels, contained in their group item), or `constant` (88-level condition
@@ -43,6 +44,8 @@ const EXEC_CICS_TRANSID_RE =
 const EXEC_SQL_INCLUDE_RE = /\bSQL\b[\s\S]*?\bINCLUDE\s+([A-Za-z0-9$#@-]+)/i;
 /** The VALUE literal in a data item's signature ("PIC X(04) VALUE 'CB00'"). */
 const VALUE_LITERAL_RE = /\bVALUE\s+['"]([A-Za-z0-9$#@-]+)['"]/i;
+/** Cache resolved literal COBOL CALL targets per extraction context */
+const cobolLiteralCallTargets = new WeakMap<ExtractorContext, Map<string, Set<string>>>();
 
 function line(node: SyntaxNode): number {
   return node.startPosition.row + 1;
@@ -81,6 +84,24 @@ function terminateSqlIncludes(source: string): string {
       return m[2] === '' ? head + '.' : head + '.' + l.slice(head.length + 1);
     })
     .join('\n');
+}
+
+function getCobolLiteralCallTargets(ctx: ExtractorContext): Map<string, Set<string>> {
+  const existing = cobolLiteralCallTargets.get(ctx);
+  if (existing) return existing;
+  const created = new Map<string, Set<string>>();
+  cobolLiteralCallTargets.set(ctx, created);
+  return created;
+}
+
+function rememberCobolCallTarget(ctx: ExtractorContext, targetName: string, literal: string): void {
+  const named = targetName.trim();
+  if (!named || !literal) return;
+  const map = getCobolLiteralCallTargets(ctx);
+  const key = named.toUpperCase();
+  const values = map.get(key) ?? new Set<string>();
+  values.add(literal);
+  map.set(key, values);
 }
 
 function addRef(
@@ -333,12 +354,23 @@ function collectRefs(
       return;
     }
     case 'call_statement': {
-      // CALL 'PROG' — static cross-program call. CALL data-name is dynamic
-      // dispatch through a variable: skipped (announce, don't guess).
+      // CALL 'PROG' — static cross-program call. CALL data-name is only a
+      // static call when we can prove the variable's value from a literal MOVE
+      // in the same file; otherwise it remains dynamic and is skipped.
       const x = getChildByField(node, 'x');
       if (x?.type === 'string') {
         const name = getNodeText(x, ctx.source).replace(/^['"]|['"]$/g, '').trim();
         addRef(ctx, fromNodeId, name, 'calls', x);
+        return;
+      }
+      if (x) {
+        const name = getNodeText(x, ctx.source).trim();
+        if (!name) return;
+        const targets = getCobolLiteralCallTargets(ctx).get(name.toUpperCase());
+        if (!targets) return;
+        for (const callTarget of [...targets].sort()) {
+          addRef(ctx, fromNodeId, callTarget, 'calls', x);
+        }
       }
       return;
     }
@@ -368,6 +400,27 @@ function headerName(header: SyntaxNode, source: string): string {
   return text.split(/\s+/)[0] ?? text;
 }
 
+/** */
+function rememberMoveLiteralAssignments(node: SyntaxNode, ctx: ExtractorContext): void {
+  if (node.type === 'move_statement') {
+    const text = getNodeText(node, ctx.source);
+    const literal = /MOVE\s+(?:"([^"]+)"|'([^']+)')\s+(?:TO|INTO)\b/i.exec(text);
+    const assigned = literal?.[1] ?? literal?.[2];
+    if (!assigned) return;
+    for (const target of node.childrenForFieldName('dst')) {
+      const word = targetBaseName(target, ctx.source);
+      if (!word) continue;
+      const name = getNodeText(word, ctx.source).trim();
+      if (!name || SPECIAL_REGISTER_RE.test(name)) continue;
+      rememberCobolCallTarget(ctx, name, assigned);
+    }
+    return;
+  }
+  for (const child of node.namedChildren) {
+    if (child) rememberMoveLiteralAssignments(child, ctx);
+  }
+}
+
 /**
  * Walk the flat PROCEDURE DIVISION (or a procedure copybook fragment):
  * reconstruct section/paragraph extents from header positions and attribute
@@ -392,6 +445,10 @@ function walkProcedureChildren(
 
   let currentFnId = currentScope(ctx);
   let sectionPushed = false;
+
+  for (const child of children) {
+    if (child) rememberMoveLiteralAssignments(child, ctx);
+  }
 
   for (let i = 0; i < children.length; i++) {
     const child = children[i]!;

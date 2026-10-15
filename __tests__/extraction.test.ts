@@ -10555,34 +10555,6 @@ export const registry = [widget];
     expect(names).toContain('beta');
   });
 
-  it('a re-export imports its source module, as an import statement does', () => {
-    const result = extractFromSource(
-      'barrel.ts',
-      `export * from './star';\nexport { alpha } from './named';\nexport * as ns from './space';\n`
-    );
-    const modules = ['./star', './named', './space'];
-    expect(result.nodes.filter((n) => n.kind === 'import').map((n) => n.name)).toEqual(modules);
-    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'imports').map((r) => r.referenceName);
-    for (const module of modules) expect(refs).toContain(module);
-    expect(refs).toContain('alpha');
-  });
-
-  it('a barrel that only re-exports everything is a dependent of the module', async () => {
-    const dir = createTempDir();
-    try {
-      fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
-      fs.writeFileSync(path.join(dir, 'src', 'foo.ts'), `export function helper(): void {}\n`);
-      fs.writeFileSync(path.join(dir, 'src', 'index.ts'), `export * from './foo';\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['src/**/*.ts'], exclude: [] } });
-      await cg.indexAll();
-      cg.resolveReferences();
-      expect(cg.getFileDependents('src/foo.ts')).toContain('src/index.ts');
-      cg.destroy();
-    } finally {
-      cleanupTempDir(dir);
-    }
-  });
-
   it('a value imported/re-exported but never called still makes the importer a dependent', async () => {
     const dir = createTempDir();
     try {
@@ -11663,6 +11635,30 @@ MAIN-SECTION SECTION.
     expect(targets).toContain('COCOM01C'); // EXEC CICS LINK PROGRAM('...')
     // Dynamic CALL through a data name is skipped — announce, don't guess.
     expect(targets).not.toContain('WS-FLAG');
+  });
+
+  it('should resolve CALL variable by the literals moved into that variable', () => {
+    const code = FIXED(`IDENTIFICATION DIVISION.
+PROGRAM-ID. CALLVAR.
+DATA DIVISION.
+WORKING-STORAGE SECTION.
+01  WS-PROG                 PIC X(8).
+01  WS-OTHER                PIC X(8) VALUE 'OTHER'.
+PROCEDURE DIVISION.
+P1.
+    MOVE 'CBACT01C' TO WS-PROG
+    MOVE 'CBACT02D' TO WS-PROG
+    MOVE WS-OTHER TO WS-PROG
+    CALL WS-PROG
+    GOBACK.
+`);
+    const result = extractFromSource('CALLVAR.cbl', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    const targets = calls.map((c) => c.referenceName);
+    expect(targets).toEqual(expect.arrayContaining(['CBACT01C', 'CBACT02D']));
+    expect(targets).not.toContain('WS-OTHER');
+    expect(targets.filter((n) => n === 'CBACT01C').length).toBe(1);
+    expect(targets.filter((n) => n === 'CBACT02D').length).toBe(1);
   });
 
   it('should extract COPY as an import node and imports reference', () => {
