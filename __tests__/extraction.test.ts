@@ -11661,6 +11661,24 @@ P1.
     expect(targets.filter((n) => n === 'CBACT02D').length).toBe(1);
   });
 
+  it('should resolve CALL variable by its VALUE clause', () => {
+    const code = FIXED(`IDENTIFICATION DIVISION.
+PROGRAM-ID. CALLVALUE.
+DATA DIVISION.
+WORKING-STORAGE SECTION.
+01  WS-PROG                 PIC X(8) VALUE 'CBACT03E'.
+PROCEDURE DIVISION.
+P1.
+    CALL WS-PROG
+    GOBACK.
+`);
+    const result = extractFromSource('CALLVALUE.cbl', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+
+    expect(calls.map((call) => call.referenceName)).toContain('CBACT03E');
+    expect(calls.map((call) => call.referenceName)).not.toContain('WS-PROG');
+  });
+
   it('should extract COPY as an import node and imports reference', () => {
     const result = extractFromSource('TESTPROG.cbl', PROGRAM);
     const importNode = result.nodes.find((n) => n.kind === 'import');

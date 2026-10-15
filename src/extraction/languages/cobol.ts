@@ -43,7 +43,7 @@ const EXEC_CICS_TRANSID_RE =
 /** EXEC SQL INCLUDE <member> — the SQL flavor of COPY. */
 const EXEC_SQL_INCLUDE_RE = /\bSQL\b[\s\S]*?\bINCLUDE\s+([A-Za-z0-9$#@-]+)/i;
 /** The VALUE literal in a data item's signature ("PIC X(04) VALUE 'CB00'"). */
-const VALUE_LITERAL_RE = /\bVALUE\s+['"]([A-Za-z0-9$#@-]+)['"]/i;
+const VALUE_LITERAL_RE = /\bVALUE(?:\s+IS)?\s+['"]([A-Za-z0-9$#@-]+)['"]/i;
 /** Cache resolved literal COBOL CALL targets per extraction context */
 const cobolLiteralCallTargets = new WeakMap<ExtractorContext, Map<string, Set<string>>>();
 
@@ -355,8 +355,8 @@ function collectRefs(
     }
     case 'call_statement': {
       // CALL 'PROG' — static cross-program call. CALL data-name is only a
-      // static call when we can prove the variable's value from a literal MOVE
-      // in the same file; otherwise it remains dynamic and is skipped.
+      // static call when its value is known from a literal MOVE or VALUE
+      // clause in the same file; otherwise it remains dynamic and is skipped.
       const x = getChildByField(node, 'x');
       if (x?.type === 'string') {
         const name = getNodeText(x, ctx.source).replace(/^['"]|['"]$/g, '').trim();
@@ -366,8 +366,9 @@ function collectRefs(
       if (x) {
         const name = getNodeText(x, ctx.source).trim();
         if (!name) return;
-        const targets = getCobolLiteralCallTargets(ctx).get(name.toUpperCase());
-        if (!targets) return;
+        const targets = new Set(getCobolLiteralCallTargets(ctx).get(name.toUpperCase()) ?? []);
+        const initialValue = derefSameFileValue(name, ctx);
+        if (initialValue) targets.add(initialValue);
         for (const callTarget of [...targets].sort()) {
           addRef(ctx, fromNodeId, callTarget, 'calls', x);
         }
